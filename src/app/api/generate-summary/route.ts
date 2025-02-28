@@ -1,8 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
 // Add more detailed logging
-const logError = (message: string, error: any) => {
+const logError = (message: string, error: unknown) => {
   console.error(`${message}:`, error);
   console.error('Error details:', JSON.stringify(error, null, 2));
 };
