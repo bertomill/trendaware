@@ -43,7 +43,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   function login(email: string, password: string) {
-    return signInWithEmailAndPassword(auth, email, password);
+    return signInWithEmailAndPassword(auth, email, password)
+      .then(userCredential => {
+        // Set cookie after successful login
+        document.cookie = `auth-token=${userCredential.user.uid}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Strict`;
+        return userCredential;
+      });
   }
 
   function logout() {
@@ -61,7 +66,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function signInWithGoogle() {
     const provider = new GoogleAuthProvider();
-    return signInWithPopup(auth, provider);
+    return signInWithPopup(auth, provider)
+      .then(userCredential => {
+        // Set cookie after successful Google sign-in
+        document.cookie = `auth-token=${userCredential.user.uid}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Strict`;
+        return userCredential;
+      });
   }
 
   useEffect(() => {

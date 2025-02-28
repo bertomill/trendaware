@@ -26,6 +26,7 @@ export default function LoginPage() {
     
     try {
       await login(email, password);
+      console.log("Login successful, redirecting to dashboard...");
       router.push('/dashboard');
     } catch (error) {
       console.error('Login error:', error);
@@ -41,6 +42,7 @@ export default function LoginPage() {
     
     try {
       await signInWithGoogle();
+      console.log("Google sign-in successful, redirecting to dashboard...");
       router.push('/dashboard');
     } catch (error) {
       console.error('Google sign-in error:', error);
