@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
@@ -11,7 +11,6 @@ import { Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { UserProfile } from '@/components/UserProfile';
-import { FirebaseError } from 'firebase/app';
 import { Progress } from "@/components/ui/progress";
 
 export default function ResearchForm() {
@@ -33,10 +32,9 @@ export default function ResearchForm() {
     fallback?: boolean;
   }>({ summary: '' });
   const [progress, setProgress] = useState(0);
-  const [estimatedTime, setEstimatedTime] = useState(15); // Default 15 seconds
+  const [estimatedTime] = useState(15); // Default 15 seconds, remove setter if not used
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const startTimeRef = useRef<number | null>(null);
-  const [webResearchUsed, setWebResearchUsed] = useState(false);
 
   // Fetch user profile when component mounts
   useEffect(() => {
@@ -60,9 +58,12 @@ export default function ResearchForm() {
 
   // Add this useEffect to clean up the interval
   useEffect(() => {
+    // Fix the exhaustive-deps warning by capturing the ref value
+    const currentProgressInterval = progressIntervalRef.current;
+    
     return () => {
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
+      if (currentProgressInterval) {
+        clearInterval(currentProgressInterval);
       }
     };
   }, []);
@@ -85,160 +86,12 @@ export default function ResearchForm() {
       setProgress(0);
       startTimeRef.current = Date.now();
       
-      // Calculate estimated time based on content length
-      const baseTime = 10; // Base time in seconds
-      const contentFactor = Math.min(content.length / 500, 3); // Max factor of 3
-      const newEstimatedTime = baseTime + (contentFactor * 5);
-      setEstimatedTime(newEstimatedTime);
-      
-      // Start progress interval
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
-      }
-      
-      progressIntervalRef.current = setInterval(() => {
-        if (startTimeRef.current) {
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          const newProgress = Math.min((elapsed / newEstimatedTime) * 100, 95);
-          setProgress(newProgress);
-        }
-      }, 100);
-      
-      // Short delay to show initial status
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      setProcessingStage('researching');
-      setStatus('Conducting web research on your topic...');
-      
-      console.log('Submitting research with user profile:', { 
-        title, 
-        content: content.substring(0, 50) + '...',
-        userProfile: userProfile ? 'available' : 'not available'
-      });
-      
-      // Call the API with a longer timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes
-      
-      let summaryContent = ""; // Define a variable to store the summary content
-      
-      try {
-        // After 5 seconds, update status to show progress even if API is still working
-        const progressTimer = setTimeout(() => {
-          setProcessingStage('generating');
-          setStatus('Analyzing information and generating your personalized summary...');
-        }, 5000);
-        
-        const startTime = Date.now();
-        const streamResponse = await fetch('/api/generate-summary-stream', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ 
-            title, 
-            content,
-            userProfile
-          }),
-          signal: controller.signal
-        });
-        const endTime = Date.now();
-        setApiResponseTime(endTime - startTime);
-        
-        clearTimeout(progressTimer);
-        clearTimeout(timeoutId);
-        
-        console.log('API response status:', streamResponse.status);
-        
-        if (!streamResponse.ok) {
-          const errorData = await streamResponse.json().catch(() => ({}));
-          console.error('API error response:', errorData);
-          
-          // Handle specific status codes
-          if (streamResponse.status === 504) {
-            throw new Error('The request timed out. Please try with shorter content or try again later.');
-          } else if (streamResponse.status === 429) {
-            throw new Error('Too many requests. Please try again later.');
-          } else {
-            throw new Error(`Failed to generate summary: ${errorData.error || streamResponse.statusText}`);
-          }
-        }
-        
-        const reader = streamResponse.body?.getReader();
-        let summaryText = '';
-        
-        if (!reader) {
-          throw new Error('Failed to get response reader');
-        }
-        
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          // Process the chunk
-          const text = new TextDecoder().decode(value);
-          
-          // Split by newlines in case multiple JSON objects were sent
-          const jsonLines = text.split('\n').filter(line => line.trim());
-          
-          for (const line of jsonLines) {
-            try {
-              const data = JSON.parse(line);
-              
-              // Handle heartbeat to keep connection alive
-              if (data.heartbeat) {
-                console.log('Received heartbeat:', new Date(data.timestamp).toISOString());
-                continue; // Skip further processing for heartbeats
-              }
-              
-              // Handle progress updates
-              if (data.progress) {
-                setProgress(data.progress);
-              }
-              
-              // Handle different message types
-              if (data.status) {
-                setStatus(data.message || '');
-                
-                if (data.status === 'researching') {
-                  setProcessingStage('researching');
-                } else if (data.status === 'generating') {
-                  setProcessingStage('generating');
-                } else if (data.status === 'researched' && data.webResearchUsed) {
-                  setWebResearchUsed(true);
-                }
-              }
-              
-              // Update summary with partial content
-              if (data.partialSummary) {
-                summaryText += data.partialSummary;
-                setSummary(summaryText);
-                
-                // Check if this chunk includes web research info
-                if (data.webResearchUsed) {
-                  setWebResearchUsed(true);
-                }
-              }
-            } catch (e) {
-              console.error('Error parsing JSON from stream:', e);
-            }
-          }
-        }
-        
-        // Set final data
-        setResponseData({ 
-          summary: summaryText,
-          webResearchUsed: webResearchUsed
-        });
-        summaryContent = summaryText;
-        
-      } catch (streamError) {
-        console.error('Streaming API failed, falling back to standard API:', streamError);
-        setStatus('Streaming failed, using standard API instead...');
-        
+      // Try streaming approach first for shorter content
+      if (content.length < 2000) {
         try {
-          // Fall back to the standard API
-          const fallbackResponse = await fetch('/api/generate-summary', {
+          setStatus('Using streaming approach for faster results...');
+          
+          const streamResponse = await fetch('/api/generate-summary-stream', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -247,38 +100,41 @@ export default function ResearchForm() {
               title, 
               content,
               userProfile
-            })
+            }),
+            // Set a shorter timeout for the streaming approach
+            signal: AbortSignal.timeout(20000)
           });
           
-          if (!fallbackResponse.ok) {
-            const fallbackErrorData = await fallbackResponse.json().catch(() => ({}));
-            console.error('Fallback API error response:', fallbackErrorData);
-            
-            throw new Error(`Failed to generate summary: ${fallbackErrorData.error || fallbackResponse.statusText}`);
+          if (!streamResponse.ok) {
+            throw new Error(`API responded with status: ${streamResponse.status}`);
           }
           
-          const fallbackReader = fallbackResponse.body?.getReader();
-          let fallbackSummaryText = '';
+          // Process the streaming response
+          const reader = streamResponse.body?.getReader();
+          let summaryText = '';
+          let isWebResearchUsed = false;
           
-          if (!fallbackReader) {
+          if (!reader) {
             throw new Error('Failed to get response reader');
           }
           
           while (true) {
-            const { done, value } = await fallbackReader.read();
-            if (done) break;
+            const { done, value } = await reader.read();
             
-            // Process the chunk
-            const text = new TextDecoder().decode(value);
+            if (done) {
+              break;
+            }
             
-            // Split by newlines in case multiple JSON objects were sent
-            const jsonLines = text.split('\n').filter(line => line.trim());
+            // Convert the chunk to text
+            const chunk = new TextDecoder().decode(value);
+            const jsonLines = chunk.split('\n').filter(line => line.trim());
             
+            // Process each line as a separate JSON message
             for (const line of jsonLines) {
               try {
                 const data = JSON.parse(line);
                 
-                // Handle heartbeat to keep connection alive
+                // Handle heartbeat messages
                 if (data.heartbeat) {
                   console.log('Received heartbeat:', new Date(data.timestamp).toISOString());
                   continue; // Skip further processing for heartbeats
@@ -298,18 +154,18 @@ export default function ResearchForm() {
                   } else if (data.status === 'generating') {
                     setProcessingStage('generating');
                   } else if (data.status === 'researched' && data.webResearchUsed) {
-                    setWebResearchUsed(true);
+                    isWebResearchUsed = true;
                   }
                 }
                 
                 // Update summary with partial content
                 if (data.partialSummary) {
-                  fallbackSummaryText += data.partialSummary;
-                  setSummary(fallbackSummaryText);
+                  summaryText += data.partialSummary;
+                  setSummary(summaryText);
                   
                   // Check if this chunk includes web research info
                   if (data.webResearchUsed) {
-                    setWebResearchUsed(true);
+                    isWebResearchUsed = true;
                   }
                 }
               } catch (e) {
@@ -320,77 +176,147 @@ export default function ResearchForm() {
           
           // Set final data
           setResponseData({ 
-            summary: fallbackSummaryText,
-            webResearchUsed: webResearchUsed
+            summary: summaryText,
+            webResearchUsed: isWebResearchUsed
           });
-          summaryContent = fallbackSummaryText;
           
-        } catch (fallbackError) {
-          throw fallbackError;
+          // Record API response time
+          if (startTimeRef.current) {
+            const endTime = Date.now();
+            const responseTime = endTime - startTimeRef.current;
+            setApiResponseTime(responseTime);
+          }
+          
+          setProgress(100);
+          setProcessingStage('complete');
+          return; // Exit if streaming was successful
+          
+        } catch (streamError) {
+          console.log('Streaming approach failed, falling back to split approach:', streamError);
+          setStatus('Switching to more reliable approach...');
         }
       }
       
-      setProcessingStage('saving');
-      setStatus('Saving research to database...');
+      // Generate a unique request ID
+      const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       
-      // Save to Firestore with better error handling
-      try {
-        const researchData = {
-          userId: currentUser.uid,
+      // Step 1: Initiate web research in the background
+      setProcessingStage('researching');
+      setStatus('Initiating web research...');
+      
+      const researchResponse = await fetch('/api/web-research', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
           title,
-          content,
-          summary: summaryContent,
-          createdAt: serverTimestamp(),
-        };
+          requestId
+        })
+      });
+      
+      if (!researchResponse.ok) {
+        throw new Error('Failed to initiate web research');
+      }
+      
+      // Step 2: Poll for research status
+      setStatus('Researching your topic...');
+      let webResearch = null;
+      let attempts = 0;
+      const maxAttempts = 15; // 15 attempts with 2-second intervals = 30 seconds max wait
+      
+      const pollInterval = setInterval(async () => {
+        attempts++;
+        setProgress(Math.min((attempts / maxAttempts) * 80, 80)); // Max 80% for research phase
         
-        console.log('Attempting to save research with data:', {
-          userId: currentUser.uid,
-          collectionPath: 'research'
-        });
-        
-        const docRef = await addDoc(collection(db, 'research'), researchData);
-        console.log('Research saved to database with ID:', docRef.id);
-        
-        // Add the summary as a subcollection
-        const summaryCollectionRef = collection(doc(db, 'research', docRef.id), 'summaries');
-        await addDoc(summaryCollectionRef, {
-          content: summaryContent, // Use the stored summary content
-          createdAt: serverTimestamp(),
-        });
-        console.log('Summary saved to database');
-        
-        // Reset form and status
-        setTitle('');
-        setContent('');
-        setStatus('');
-        
-      } catch (firestoreError) {
-        console.error('Detailed Firestore error:', firestoreError);
-        
-        if (firestoreError instanceof FirebaseError) {
-          console.error('Error code:', firestoreError.code);
-          console.error('Error message:', firestoreError.message);
+        try {
+          const statusResponse = await fetch(`/api/web-research?requestId=${requestId}`);
+          
+          if (statusResponse.ok) {
+            const data = await statusResponse.json();
+            
+            if (data.status === 'completed') {
+              clearInterval(pollInterval);
+              webResearch = data.research;
+              setStatus('Web research complete, generating summary...');
+              setProcessingStage('generating');
+              setProgress(85);
+              
+              // Proceed to summary generation
+              generateSummary(webResearch);
+            } else if (data.status === 'failed') {
+              clearInterval(pollInterval);
+              console.warn('Web research failed:', data.error);
+              setStatus('Web research unavailable, generating summary with your content only...');
+              setProcessingStage('generating');
+              setProgress(85);
+              
+              // Proceed without web research
+              generateSummary(null);
+            }
+          }
+        } catch (error) {
+          console.error('Error checking research status:', error);
         }
         
-        throw new Error(`Database error: ${firestoreError instanceof Error ? firestoreError.message : 'Unknown error'}`);
-      }
+        // If we've reached max attempts, proceed without web research
+        if (attempts >= maxAttempts) {
+          clearInterval(pollInterval);
+          setStatus('Web research taking too long, proceeding with your content only...');
+          setProcessingStage('generating');
+          setProgress(85);
+          
+          // Proceed without web research
+          generateSummary(null);
+        }
+      }, 2000);
       
-      setProcessingStage('complete');
-      
-      // When complete, set progress to 100%
-      setProgress(100);
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
-      }
+      // Function to generate summary once research is done or timed out
+      const generateSummary = async (webResearch: string | null) => {
+        try {
+          const summaryResponse = await fetch('/api/generate-summary', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ 
+              title, 
+              content,
+              userProfile,
+              webResearch
+            })
+          });
+          
+          if (!summaryResponse.ok) {
+            throw new Error('Failed to generate summary');
+          }
+          
+          const data = await summaryResponse.json();
+          setSummary(data.summary);
+          setResponseData({
+            summary: data.summary,
+            webResearchUsed: !!webResearch
+          });
+          
+          // Record API response time
+          if (startTimeRef.current) {
+            const endTime = Date.now();
+            const responseTime = endTime - startTimeRef.current;
+            setApiResponseTime(responseTime);
+          }
+          
+          setProgress(100);
+          setProcessingStage('complete');
+        } catch (error) {
+          throw error;
+        }
+      };
       
     } catch (error) {
       console.error('Error submitting research:', error);
       setError(`${error instanceof Error ? error.message : 'Failed to submit research. Please try again.'}`);
       setStatus('');
       setProcessingStage('idle');
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
-      }
       setProgress(0);
     } finally {
       setLoading(false);

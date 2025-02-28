@@ -75,7 +75,7 @@ export async function POST(request: Request) {
       );
     }
     
-    const { title, content, userProfile } = requestBody;
+    const { title, content, userProfile, webResearch } = requestBody;
     
     // Validate request data
     if (!title || !content) {
@@ -105,9 +105,11 @@ Their areas of expertise include ${userProfile.expertise?.join(', ') || 'finance
 Tailor your summary to their background and interests, addressing them by name occasionally to make it conversational and personalized.`;
     }
 
-    // Try to get web research from Perplexity first if API key is available
-    let webResearchResults = "";
-    if (process.env.PERPLEXITY_API_KEY) {
+    // Use provided web research if available, otherwise leave empty
+    let webResearchResults = webResearch || "";
+    
+    // Skip Perplexity API call if web research is already provided
+    if (!webResearch && process.env.PERPLEXITY_API_KEY) {
       try {
         console.log('Sending request to Perplexity API for web research');
         console.time('perplexity-request');

@@ -14,6 +14,7 @@ import {
 import { auth } from '@/src/lib/firebase';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/src/lib/firebase';
+import { useRouter } from 'next/navigation';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -37,6 +38,7 @@ export function useAuth() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const router = useRouter();
 
   function signup(email: string, password: string) {
     return createUserWithEmailAndPassword(auth, email, password);
@@ -51,9 +53,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
   }
 
-  function logout() {
-    return signOut(auth);
-  }
+  const logout = async () => {
+    try {
+      setLoading(true);
+      await signOut(auth);
+      // Redirect to login page after successful logout
+      router.push('/login');
+    } catch (error) {
+      console.error('Error signing out:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
