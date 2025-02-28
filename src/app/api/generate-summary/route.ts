@@ -1,13 +1,36 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-// Add more detailed logging
+// Enhanced error logging function
 const logError = (message: string, error: unknown) => {
   console.error(`${message}:`, error);
-  console.error('Error details:', JSON.stringify(error, null, 2));
+  
+  // Log additional details about the error
+  if (error instanceof Error) {
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
+    // Log additional properties for API errors
+    if ('status' in error) {
+      console.error('Status:', (error as any).status);
+    }
+    if ('response' in error) {
+      console.error('Response:', (error as any).response?.data || (error as any).response);
+    }
+  }
+  
+  // Log as JSON for better visibility in logs
+  try {
+    console.error('Error details:', JSON.stringify(error, null, 2));
+  } catch (e) {
+    console.error('Error could not be stringified:', e);
+  }
 };
 
 export async function POST(request: Request) {
+  console.log('API route called: /api/generate-summary');
+  
   try {
     // Check if API keys are available
     if (!process.env.OPENAI_API_KEY) {
@@ -17,6 +40,34 @@ export async function POST(request: Request) {
         { status: 500 }
       );
     }
+
+    console.log('OpenAI API key is configured');
+    
+    // Parse request body
+    let requestBody;
+    try {
+      requestBody = await request.json();
+      console.log('Request body parsed successfully');
+    } catch (error) {
+      logError('Failed to parse request body', error);
+      return NextResponse.json(
+        { error: 'Invalid request body' },
+        { status: 400 }
+      );
+    }
+    
+    const { title, content } = requestBody;
+    
+    // Validate request data
+    if (!title || !content) {
+      console.error('Missing required fields:', { hasTitle: !!title, hasContent: !!content });
+      return NextResponse.json(
+        { error: 'Title and content are required' },
+        { status: 400 }
+      );
+    }
+
+    console.log('Request validation passed, initializing OpenAI');
 
     // Initialize OpenAI with API key from environment variable
     const openai = new OpenAI({
@@ -32,27 +83,6 @@ export async function POST(request: Request) {
       });
     } else {
       console.warn('Missing PERPLEXITY_API_KEY environment variable - web search will be skipped');
-    }
-
-    // Parse request body
-    let title, content;
-    try {
-      const body = await request.json();
-      title = body.title;
-      content = body.content;
-    } catch (error) {
-      logError('Error parsing request body', error);
-      return NextResponse.json(
-        { error: 'Invalid request body' },
-        { status: 400 }
-      );
-    }
-
-    if (!title || !content) {
-      return NextResponse.json(
-        { error: 'Title and content are required' },
-        { status: 400 }
-      );
     }
 
     // Use Perplexity Sonar if available
@@ -97,53 +127,81 @@ export async function POST(request: Request) {
 
     // Use OpenAI to generate the final summary
     try {
-      console.log('Calling OpenAI API...');
+      console.log('Sending request to OpenAI API');
+      console.time('openai-request');
+      
+      // Create a more detailed prompt
       const finalPrompt = `
-        You are an AI research assistant for financial technology professionals.
+        Please analyze the following research content and provide a comprehensive summary:
         
-        Research Topic: ${title}
+        TITLE: ${title}
         
-        Original Research Content:
+        CONTENT:
         ${content}
         
         Additional Web Research:
         ${webResearchResults}
         
-        Please:
-        1. Summarize the key points from the original research
-        2. Incorporate relevant information from the web research
-        3. Identify potential implications for the banking/financial services industry
-        4. Suggest areas for further research
-        5. Include citations or sources from the web research where applicable
+        Please provide a well-structured summary that includes:
+        1. Key points and findings
+        2. Important trends or patterns
+        3. Potential implications
+        4. Any notable data or statistics
         
-        Format your response in HTML with appropriate headings and sections.
+        Format the summary with appropriate headings and bullet points where relevant.
       `;
-
-      const response = await openai.chat.completions.create({
-        model: "gpt-4",
-        messages: [
-          { role: "system", content: "You are a helpful assistant that specializes in financial technology research." },
-          { role: "user", content: finalPrompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 2000,
-      });
-
-      const summary = response.choices[0].message.content || "Unable to generate summary.";
+      
+      // Call OpenAI API with timeout handling
+      const response = await Promise.race([
+        openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [
+            { role: "system", content: "You are a financial research assistant, skilled at summarizing complex information." },
+            { role: "user", content: finalPrompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 2000,
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('OpenAI API request timed out after 50 seconds')), 50000)
+        )
+      ]) as OpenAI.Chat.Completions.ChatCompletion;
+      
+      console.timeEnd('openai-request');
       console.log('OpenAI API response received');
 
+      const summary = response.choices[0].message.content || "Unable to generate summary.";
       return NextResponse.json({ summary });
+      
     } catch (error) {
       logError('Error with OpenAI API', error);
+      
+      // Provide more specific error messages based on error type
+      if (error instanceof Error) {
+        if (error.message.includes('timed out')) {
+          return NextResponse.json(
+            { error: 'The request to OpenAI timed out. Please try again with a shorter content.' },
+            { status: 504 }
+          );
+        }
+        
+        if ('status' in error && (error as any).status === 429) {
+          return NextResponse.json(
+            { error: 'Rate limit exceeded with OpenAI. Please try again later.' },
+            { status: 429 }
+          );
+        }
+      }
+      
       return NextResponse.json(
-        { error: 'Failed to generate summary with OpenAI' },
+        { error: 'Failed to generate summary with OpenAI', details: error instanceof Error ? error.message : String(error) },
         { status: 500 }
       );
     }
   } catch (error) {
     logError('Unexpected error in generate-summary API', error);
     return NextResponse.json(
-      { error: 'An unexpected error occurred' },
+      { error: 'An unexpected error occurred', details: error instanceof Error ? error.message : String(error) },
       { status: 500 }
     );
   }
