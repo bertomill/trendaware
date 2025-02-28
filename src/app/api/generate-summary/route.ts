@@ -55,7 +55,12 @@ export async function POST(request: Request) {
       );
     }
 
-    console.log('OpenAI API key is configured');
+    if (!process.env.PERPLEXITY_API_KEY) {
+      console.error('Missing PERPLEXITY_API_KEY environment variable');
+      console.log('Will proceed with OpenAI only');
+    }
+
+    console.log('API keys are configured');
     
     // Parse request body
     let requestBody;
@@ -83,6 +88,66 @@ export async function POST(request: Request) {
 
     console.log('Request validation passed, user profile available:', !!userProfile);
 
+    // Reduce token count for faster response
+    const maxContentLength = 4000; // Limit content length
+    const truncatedContent = content.length > maxContentLength 
+      ? content.substring(0, maxContentLength) + "..." 
+      : content;
+    
+    // Create a personalized system message
+    let systemMessage = "You are a financial research assistant, skilled at summarizing complex information.";
+    
+    if (userProfile) {
+      systemMessage = `You are a financial research assistant helping ${userProfile.displayName || 'a user'}, who works as a ${userProfile.jobTitle || 'a professional'} in the ${userProfile.industry || 'financial'} industry. 
+      
+Their areas of expertise include ${userProfile.expertise?.join(', ') || 'finance'}, and they're interested in ${userProfile.interests?.join(', ') || 'financial technology'}. 
+      
+Tailor your summary to their background and interests, addressing them by name occasionally to make it conversational and personalized.`;
+    }
+
+    // Try to get web research from Perplexity first if API key is available
+    let webResearchResults = "";
+    if (process.env.PERPLEXITY_API_KEY) {
+      try {
+        console.log('Sending request to Perplexity API for web research');
+        console.time('perplexity-request');
+        
+        const perplexityResponse = await fetch('https://api.perplexity.ai/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: "sonar-pro",
+            messages: [
+              { 
+                role: "system", 
+                content: "You are a financial research assistant. Search the web for the most recent and relevant information. Focus on facts, data, and recent developments." 
+              },
+              { 
+                role: "user", 
+                content: `Research the following topic and provide the most recent information: ${title}. Focus on financial implications, market trends, and recent news.` 
+              }
+            ],
+          }),
+        });
+        
+        console.timeEnd('perplexity-request');
+        
+        if (perplexityResponse.ok) {
+          const perplexityData = await perplexityResponse.json();
+          webResearchResults = perplexityData.choices[0].message.content;
+          console.log('Perplexity web research successful');
+        } else {
+          console.error('Perplexity API error:', await perplexityResponse.text());
+        }
+      } catch (error) {
+        logError('Error with Perplexity API', error);
+        console.log('Will proceed with OpenAI only');
+      }
+    }
+
     // Initialize OpenAI with API key from environment variable
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
@@ -93,31 +158,17 @@ export async function POST(request: Request) {
       console.log('Sending request to OpenAI API');
       console.time('openai-request');
       
-      // Create a personalized system message
-      let systemMessage = "You are a financial research assistant, skilled at summarizing complex information.";
-      
-      if (userProfile) {
-        systemMessage = `You are a financial research assistant helping ${userProfile.displayName || 'a user'}, who works as a ${userProfile.jobTitle || 'a professional'} in the ${userProfile.industry || 'financial'} industry. 
-        
-Their areas of expertise include ${userProfile.expertise?.join(', ') || 'finance'}, and they're interested in ${userProfile.interests?.join(', ') || 'financial technology'}. 
-        
-Tailor your summary to their background and interests, addressing them by name occasionally to make it conversational and personalized.`;
-      }
-      
-      // Reduce token count for faster response
-      const maxContentLength = 4000; // Limit content length
-      const truncatedContent = content.length > maxContentLength 
-        ? content.substring(0, maxContentLength) + "..." 
-        : content;
-      
-      // Create a more efficient prompt
+      // Create a more efficient prompt that includes web research if available
       const finalPrompt = `
         Summarize this research concisely:
         
         TITLE: ${title}
         
-        CONTENT:
+        USER CONTENT:
         ${truncatedContent}
+        
+        ${webResearchResults ? `RECENT WEB RESEARCH:
+        ${webResearchResults}` : ''}
         
         ${userProfile ? `Make it personal for ${userProfile.displayName}, a ${userProfile.jobTitle} in ${userProfile.industry}.` : ''}
       `;
@@ -142,7 +193,10 @@ Tailor your summary to their background and interests, addressing them by name o
       console.log('OpenAI API response received');
 
       const summary = response.choices[0].message.content || "Unable to generate summary.";
-      return NextResponse.json({ summary });
+      return NextResponse.json({ 
+        summary,
+        webResearchUsed: !!webResearchResults
+      });
       
     } catch (error) {
       logError('Error with OpenAI API', error);
@@ -161,13 +215,15 @@ Tailor your summary to their background and interests, addressing them by name o
           * This research focuses on ${title}
           * The content contains approximately ${content.length} characters
           ${userProfile ? `* Prepared for ${userProfile.displayName}` : ''}
+          ${webResearchResults ? '* Web research was conducted but could not be fully processed' : ''}
           
           Please try again later with a shorter research content for better results.
         `;
         
         return NextResponse.json({ 
           summary: fallbackSummary,
-          fallback: true
+          fallback: true,
+          webResearchUsed: !!webResearchResults
         });
       }
       
