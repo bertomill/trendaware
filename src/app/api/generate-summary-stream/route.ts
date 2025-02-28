@@ -75,24 +75,24 @@ export async function POST(request: Request) {
               'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
             },
             body: JSON.stringify({
-              model: "sonar-small-online", // Use a faster model
+              model: "sonar-pro", // Change back to the more comprehensive model
               messages: [
                 { 
                   role: "system", 
-                  content: "You are a financial research assistant. Search the web for the most recent information. Be extremely concise." 
+                  content: "You are a financial research assistant. Search the web for the most recent and relevant information. Focus on facts, data, and recent developments. Provide comprehensive but concise results." 
                 },
                 { 
                   role: "user", 
-                  content: `Briefly research: ${title}. Focus on key facts only.` 
+                  content: `Research the following topic thoroughly: ${title}. Focus on financial implications, market trends, and recent news. Include specific data points and insights when available.` 
                 }
               ],
-              max_tokens: 300, // Reduce token count
+              max_tokens: 800, // Increase token count for more comprehensive results
             }),
           });
           
-          // Even shorter timeout
+          // Increase timeout for more comprehensive results
           const timeoutPromise = new Promise<Response>((_, reject) => 
-            setTimeout(() => reject(new Error('Perplexity API request timed out')), 8000)
+            setTimeout(() => reject(new Error('Perplexity API request timed out')), 15000) // Increase to 15 seconds
           );
           
           // Send progress updates while waiting
@@ -117,11 +117,15 @@ export async function POST(request: Request) {
               webResearchResults = perplexityData.choices[0].message.content;
               webResearchUsed = true;
               
+              // Log the web research results for debugging
+              console.log('Perplexity web research results:', webResearchResults.substring(0, 100) + '...');
+              
               // Update the client that web research was successful
               writer.write(encoder.encode(JSON.stringify({ 
                 status: 'researched',
                 message: 'Web research complete, generating summary...',
-                webResearchUsed: true
+                webResearchUsed: true,
+                webResearchLength: webResearchResults.length
               }) + '\n'));
             } else {
               writer.write(encoder.encode(JSON.stringify({ 
@@ -168,8 +172,10 @@ export async function POST(request: Request) {
         USER CONTENT:
         ${truncatedContent}
         
-        ${webResearchResults ? `RECENT WEB RESEARCH:
-        ${webResearchResults}` : ''}
+        ${webResearchResults ? `RECENT WEB RESEARCH FROM PERPLEXITY:
+        ${webResearchResults}
+        
+        IMPORTANT: Incorporate the above web research prominently in your summary. It contains up-to-date information that should be highlighted.` : ''}
         
         ${userProfile ? `Make it personal for ${userProfile.displayName}, a ${userProfile.jobTitle} in ${userProfile.industry}.` : ''}
       `;
