@@ -38,8 +38,8 @@ const logError = (message: string, error: unknown) => {
 };
 
 export const config = {
-  maxDuration: 60, // Set maximum duration to 60 seconds
-  runtime: 'edge', // Use edge runtime for better performance
+  maxDuration: 60,
+  runtime: 'edge',
 };
 
 export async function POST(request: Request) {

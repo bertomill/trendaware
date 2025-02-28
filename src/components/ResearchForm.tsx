@@ -11,6 +11,7 @@ import { Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { UserProfile } from '@/components/UserProfile';
+import { FirebaseError } from 'firebase/app';
 
 export default function ResearchForm() {
   const [title, setTitle] = useState('');
@@ -144,6 +145,11 @@ export default function ResearchForm() {
           createdAt: serverTimestamp(),
         };
         
+        console.log('Attempting to save research with data:', {
+          userId: currentUser.uid,
+          collectionPath: 'research'
+        });
+        
         const docRef = await addDoc(collection(db, 'research'), researchData);
         console.log('Research saved to database with ID:', docRef.id);
         
@@ -161,7 +167,13 @@ export default function ResearchForm() {
         setStatus('');
         
       } catch (firestoreError) {
-        console.error('Firestore error:', firestoreError);
+        console.error('Detailed Firestore error:', firestoreError);
+        
+        if (firestoreError instanceof FirebaseError) {
+          console.error('Error code:', firestoreError.code);
+          console.error('Error message:', firestoreError.message);
+        }
+        
         throw new Error(`Database error: ${firestoreError instanceof Error ? firestoreError.message : 'Unknown error'}`);
       }
       

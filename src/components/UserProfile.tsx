@@ -42,7 +42,10 @@ export function UserProfileForm() {
 
   useEffect(() => {
     async function loadProfile() {
-      if (!currentUser) return;
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
       
       try {
         const docRef = doc(db, 'userProfiles', currentUser.uid);
