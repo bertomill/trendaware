@@ -142,6 +142,7 @@ export default function ResearchForm() {
           userId: currentUser.uid,
           title,
           content,
+          summary: summaryContent,
           createdAt: serverTimestamp(),
         };
         
