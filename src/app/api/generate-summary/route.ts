@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
+// Define a type for API errors
+interface ApiError extends Error {
+  status?: number;
+  response?: {
+    data?: unknown;
+    [key: string]: unknown;
+  };
+}
+
 // Enhanced error logging function
 const logError = (message: string, error: unknown) => {
   console.error(`${message}:`, error);
@@ -13,10 +22,10 @@ const logError = (message: string, error: unknown) => {
     
     // Log additional properties for API errors
     if ('status' in error) {
-      console.error('Status:', (error as any).status);
+      console.error('Status:', (error as ApiError).status);
     }
     if ('response' in error) {
-      console.error('Response:', (error as any).response?.data || (error as any).response);
+      console.error('Response:', (error as ApiError).response?.data || (error as ApiError).response);
     }
   }
   
@@ -26,6 +35,11 @@ const logError = (message: string, error: unknown) => {
   } catch (e) {
     console.error('Error could not be stringified:', e);
   }
+};
+
+export const config = {
+  maxDuration: 60, // Set maximum duration to 60 seconds
+  runtime: 'edge', // Use edge runtime for better performance
 };
 
 export async function POST(request: Request) {
@@ -56,7 +70,7 @@ export async function POST(request: Request) {
       );
     }
     
-    const { title, content } = requestBody;
+    const { title, content, userProfile } = requestBody;
     
     // Validate request data
     if (!title || !content) {
@@ -67,103 +81,60 @@ export async function POST(request: Request) {
       );
     }
 
-    console.log('Request validation passed, initializing OpenAI');
+    console.log('Request validation passed, user profile available:', !!userProfile);
 
     // Initialize OpenAI with API key from environment variable
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    // Initialize Perplexity client if API key is available
-    let perplexity = null;
-    if (process.env.PERPLEXITY_API_KEY) {
-      perplexity = new OpenAI({
-        apiKey: process.env.PERPLEXITY_API_KEY,
-        baseURL: 'https://api.perplexity.ai',
-      });
-    } else {
-      console.warn('Missing PERPLEXITY_API_KEY environment variable - web search will be skipped');
-    }
-
-    // Use Perplexity Sonar if available
-    let webResearchResults = "";
-    if (perplexity) {
-      try {
-        console.log('Calling Perplexity API...');
-        const webResearchPrompt = `
-          I need comprehensive, up-to-date information about the following financial technology topic:
-          
-          Topic: ${title}
-          
-          Please search the web and provide:
-          1. Recent developments and news
-          2. Key industry players
-          3. Market trends
-          4. Regulatory considerations
-          5. Expert opinions
-          
-          This information will be used to enhance a research summary.
-        `;
-
-        const perplexityResponse = await perplexity.chat.completions.create({
-          model: "sonar-pro",
-          messages: [
-            { role: "system", content: "You are a financial technology research assistant. Provide comprehensive, factual information with sources when available." },
-            { role: "user", content: webResearchPrompt }
-          ],
-          temperature: 0.5,
-          max_tokens: 2000,
-        });
-        
-        webResearchResults = perplexityResponse.choices[0].message.content || "";
-        console.log('Perplexity API response received');
-      } catch (error) {
-        logError('Error with Perplexity API', error);
-        webResearchResults = "Unable to retrieve additional web research at this time.";
-      }
-    } else {
-      webResearchResults = "Web research capability is not configured.";
-    }
-
     // Use OpenAI to generate the final summary
     try {
       console.log('Sending request to OpenAI API');
       console.time('openai-request');
       
-      // Create a more detailed prompt
+      // Create a personalized system message
+      let systemMessage = "You are a financial research assistant, skilled at summarizing complex information.";
+      
+      if (userProfile) {
+        systemMessage = `You are a financial research assistant helping ${userProfile.displayName || 'a user'}, who works as a ${userProfile.jobTitle || 'a professional'} in the ${userProfile.industry || 'financial'} industry. 
+        
+Their areas of expertise include ${userProfile.expertise?.join(', ') || 'finance'}, and they're interested in ${userProfile.interests?.join(', ') || 'financial technology'}. 
+        
+Tailor your summary to their background and interests, addressing them by name occasionally to make it conversational and personalized.`;
+      }
+      
+      // Reduce token count for faster response
+      const maxContentLength = 4000; // Limit content length
+      const truncatedContent = content.length > maxContentLength 
+        ? content.substring(0, maxContentLength) + "..." 
+        : content;
+      
+      // Create a more efficient prompt
       const finalPrompt = `
-        Please analyze the following research content and provide a comprehensive summary:
+        Summarize this research concisely:
         
         TITLE: ${title}
         
         CONTENT:
-        ${content}
+        ${truncatedContent}
         
-        Additional Web Research:
-        ${webResearchResults}
-        
-        Please provide a well-structured summary that includes:
-        1. Key points and findings
-        2. Important trends or patterns
-        3. Potential implications
-        4. Any notable data or statistics
-        
-        Format the summary with appropriate headings and bullet points where relevant.
+        ${userProfile ? `Make it personal for ${userProfile.displayName}, a ${userProfile.jobTitle} in ${userProfile.industry}.` : ''}
       `;
       
-      // Call OpenAI API with timeout handling
+      // Use a faster model with stricter timeout
       const response = await Promise.race([
         openai.chat.completions.create({
-          model: "gpt-3.5-turbo",
+          model: "gpt-3.5-turbo", // Consider using a faster model
           messages: [
-            { role: "system", content: "You are a financial research assistant, skilled at summarizing complex information." },
+            { role: "system", content: systemMessage },
             { role: "user", content: finalPrompt }
           ],
-          temperature: 0.7,
-          max_tokens: 2000,
+          temperature: 0.5, // Lower temperature for faster, more deterministic responses
+          max_tokens: 1000, // Reduce token count
         }),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('OpenAI API request timed out after 50 seconds')), 50000)
+          setTimeout(() => reject(new Error('OpenAI API request timed out after 30 seconds')), 30000)
         )
       ]) as OpenAI.Chat.Completions.ChatCompletion;
       
@@ -176,21 +147,37 @@ export async function POST(request: Request) {
     } catch (error) {
       logError('Error with OpenAI API', error);
       
-      // Provide more specific error messages based on error type
-      if (error instanceof Error) {
-        if (error.message.includes('timed out')) {
-          return NextResponse.json(
-            { error: 'The request to OpenAI timed out. Please try again with a shorter content.' },
-            { status: 504 }
-          );
-        }
+      // Provide a fallback summary if OpenAI times out
+      if (error instanceof Error && error.message.includes('timed out')) {
+        console.log('OpenAI timed out, generating fallback summary');
         
-        if ('status' in error && (error as any).status === 429) {
-          return NextResponse.json(
-            { error: 'Rate limit exceeded with OpenAI. Please try again later.' },
-            { status: 429 }
-          );
-        }
+        // Generate a simple fallback summary
+        const fallbackSummary = `
+          # Summary of "${title}"
+          
+          Due to high demand, we couldn't generate a complete AI summary at this time. 
+          
+          ## Key Points:
+          * This research focuses on ${title}
+          * The content contains approximately ${content.length} characters
+          ${userProfile ? `* Prepared for ${userProfile.displayName}` : ''}
+          
+          Please try again later with a shorter research content for better results.
+        `;
+        
+        return NextResponse.json({ 
+          summary: fallbackSummary,
+          fallback: true
+        });
+      }
+      
+      // Provide more specific error messages based on error type
+      const apiError = error as ApiError;
+      if ('status' in apiError && apiError.status === 429) {
+        return NextResponse.json(
+          { error: 'Rate limit exceeded with OpenAI. Please try again later.' },
+          { status: 429 }
+        );
       }
       
       return NextResponse.json(

@@ -49,8 +49,8 @@ const nextConfig = {
   
   // Enable experimental features if needed
   experimental: {
-    // Enable if you're using server actions
-    serverActions: true,
+    // Fix: serverActions should be an object or removed
+    // serverActions: true,
   },
   
   // Configure webpack if needed
