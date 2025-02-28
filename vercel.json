@@ -1,3 +1,11 @@
 {
-  "buildCommand": "next build"
+  "buildCommand": "next build",
+  "functions": {
+    "api/generate-summary-stream/*.ts": {
+      "maxDuration": 60
+    },
+    "api/generate-summary/*.ts": {
+      "maxDuration": 60
+    }
+  }
 }

@@ -6,11 +6,29 @@ export const config = {
   runtime: 'edge',
 };
 
+// Helper function to log errors
+const logError = (message: string, error: unknown) => {
+  console.error(`${message}:`, error);
+  if (error instanceof Error) {
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+  }
+};
+
 export async function POST(request: Request) {
   // Create a TransformStream to stream the response
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
+
+  // Set up a heartbeat to keep the connection alive
+  const heartbeatInterval = setInterval(() => {
+    writer.write(encoder.encode(JSON.stringify({ 
+      heartbeat: true,
+      timestamp: Date.now()
+    }) + '\n'));
+  }, 5000); // Send heartbeat every 5 seconds
 
   // Process the request in the background
   const processRequest = async () => {
@@ -30,11 +48,99 @@ export async function POST(request: Request) {
         ? content.substring(0, maxContentLength) + "..." 
         : content;
       
-      // Send update
+      // Send update about web research
       writer.write(encoder.encode(JSON.stringify({ 
         status: 'researching',
-        message: 'Researching your topic...'
+        message: 'Searching the web for recent information...'
       }) + '\n'));
+      
+      // Try to get web research from Perplexity if API key is available
+      let webResearchResults = "";
+      let webResearchUsed = false;
+      
+      if (process.env.PERPLEXITY_API_KEY) {
+        try {
+          // Send immediate feedback
+          writer.write(encoder.encode(JSON.stringify({ 
+            status: 'researching',
+            message: 'Initiating web search...',
+            progress: 10
+          }) + '\n'));
+          
+          // Use a shorter timeout for Perplexity
+          const perplexityPromise = fetch('https://api.perplexity.ai/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
+            },
+            body: JSON.stringify({
+              model: "sonar-small-online", // Use a faster model
+              messages: [
+                { 
+                  role: "system", 
+                  content: "You are a financial research assistant. Search the web for the most recent information. Be extremely concise." 
+                },
+                { 
+                  role: "user", 
+                  content: `Briefly research: ${title}. Focus on key facts only.` 
+                }
+              ],
+              max_tokens: 300, // Reduce token count
+            }),
+          });
+          
+          // Even shorter timeout
+          const timeoutPromise = new Promise<Response>((_, reject) => 
+            setTimeout(() => reject(new Error('Perplexity API request timed out')), 8000)
+          );
+          
+          // Send progress updates while waiting
+          let progressCounter = 20;
+          const progressInterval = setInterval(() => {
+            if (progressCounter < 90) {
+              progressCounter += 10;
+              writer.write(encoder.encode(JSON.stringify({ 
+                status: 'researching',
+                message: 'Still searching the web...',
+                progress: progressCounter
+              }) + '\n'));
+            }
+          }, 2000);
+          
+          try {
+            const perplexityResponse = await Promise.race([perplexityPromise, timeoutPromise]) as Response;
+            clearInterval(progressInterval);
+            
+            if (perplexityResponse.ok) {
+              const perplexityData = await perplexityResponse.json();
+              webResearchResults = perplexityData.choices[0].message.content;
+              webResearchUsed = true;
+              
+              // Update the client that web research was successful
+              writer.write(encoder.encode(JSON.stringify({ 
+                status: 'researched',
+                message: 'Web research complete, generating summary...',
+                webResearchUsed: true
+              }) + '\n'));
+            } else {
+              writer.write(encoder.encode(JSON.stringify({ 
+                status: 'researching',
+                message: 'Web search unavailable, using your content only...'
+              }) + '\n'));
+            }
+          } catch (timeoutError) {
+            clearInterval(progressInterval);
+            throw timeoutError;
+          }
+        } catch (error) {
+          logError('Error with Perplexity API', error);
+          writer.write(encoder.encode(JSON.stringify({ 
+            status: 'researching',
+            message: 'Web search timed out, proceeding with your content only...'
+          }) + '\n'));
+        }
+      }
       
       // Initialize OpenAI
       const openai = new OpenAI({
@@ -50,15 +156,30 @@ export async function POST(request: Request) {
       // Send update
       writer.write(encoder.encode(JSON.stringify({ 
         status: 'generating',
-        message: 'Generating summary...'
+        message: 'Generating your personalized summary...'
       }) + '\n'));
+      
+      // Create a prompt that includes web research if available
+      const finalPrompt = `
+        Summarize this research concisely:
+        
+        TITLE: ${title}
+        
+        USER CONTENT:
+        ${truncatedContent}
+        
+        ${webResearchResults ? `RECENT WEB RESEARCH:
+        ${webResearchResults}` : ''}
+        
+        ${userProfile ? `Make it personal for ${userProfile.displayName}, a ${userProfile.jobTitle} in ${userProfile.industry}.` : ''}
+      `;
       
       // Generate summary with OpenAI
       const response = await openai.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: [
           { role: "system", content: systemMessage },
-          { role: "user", content: `Summarize this research concisely: TITLE: ${title} CONTENT: ${truncatedContent}` }
+          { role: "user", content: finalPrompt }
         ],
         temperature: 0.5,
         max_tokens: 1000,
@@ -70,7 +191,8 @@ export async function POST(request: Request) {
         const content = chunk.choices[0]?.delta?.content || '';
         if (content) {
           writer.write(encoder.encode(JSON.stringify({ 
-            partialSummary: content
+            partialSummary: content,
+            webResearchUsed
           }) + '\n'));
         }
       }
@@ -78,7 +200,8 @@ export async function POST(request: Request) {
       // Send completion
       writer.write(encoder.encode(JSON.stringify({ 
         status: 'complete',
-        message: 'Summary generation complete'
+        message: 'Summary generation complete',
+        webResearchUsed
       }) + '\n'));
       
     } catch (error) {
@@ -88,6 +211,7 @@ export async function POST(request: Request) {
         message: error instanceof Error ? error.message : 'An error occurred'
       }) + '\n'));
     } finally {
+      clearInterval(heartbeatInterval); // Clear the heartbeat interval
       writer.close();
     }
   };
@@ -99,7 +223,9 @@ export async function POST(request: Request) {
   return new Response(stream.readable, {
     headers: {
       'Content-Type': 'application/json',
-      'Transfer-Encoding': 'chunked'
+      'Transfer-Encoding': 'chunked',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
     }
   });
 } 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
@@ -9,9 +9,10 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { UserProfile } from '@/components/UserProfile';
 import { FirebaseError } from 'firebase/app';
+import { Progress } from "@/components/ui/progress";
 
 export default function ResearchForm() {
   const [title, setTitle] = useState('');
@@ -26,6 +27,16 @@ export default function ResearchForm() {
     'idle' | 'submitting' | 'researching' | 'generating' | 'saving' | 'complete'
   >('idle');
   const [apiResponseTime, setApiResponseTime] = useState<number | null>(null);
+  const [responseData, setResponseData] = useState<{ 
+    summary: string;
+    webResearchUsed?: boolean;
+    fallback?: boolean;
+  }>({ summary: '' });
+  const [progress, setProgress] = useState(0);
+  const [estimatedTime, setEstimatedTime] = useState(15); // Default 15 seconds
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const startTimeRef = useRef<number | null>(null);
+  const [webResearchUsed, setWebResearchUsed] = useState(false);
 
   // Fetch user profile when component mounts
   useEffect(() => {
@@ -47,6 +58,15 @@ export default function ResearchForm() {
     fetchUserProfile();
   }, [currentUser]);
 
+  // Add this useEffect to clean up the interval
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+    };
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
@@ -60,6 +80,29 @@ export default function ResearchForm() {
       setError('');
       setProcessingStage('submitting');
       setStatus('Preparing your research request...');
+      
+      // Reset progress
+      setProgress(0);
+      startTimeRef.current = Date.now();
+      
+      // Calculate estimated time based on content length
+      const baseTime = 10; // Base time in seconds
+      const contentFactor = Math.min(content.length / 500, 3); // Max factor of 3
+      const newEstimatedTime = baseTime + (contentFactor * 5);
+      setEstimatedTime(newEstimatedTime);
+      
+      // Start progress interval
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+      
+      progressIntervalRef.current = setInterval(() => {
+        if (startTimeRef.current) {
+          const elapsed = (Date.now() - startTimeRef.current) / 1000;
+          const newProgress = Math.min((elapsed / newEstimatedTime) * 100, 95);
+          setProgress(newProgress);
+        }
+      }, 100);
       
       // Short delay to show initial status
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -87,7 +130,7 @@ export default function ResearchForm() {
         }, 5000);
         
         const startTime = Date.now();
-        const response = await fetch('/api/generate-summary', {
+        const streamResponse = await fetch('/api/generate-summary-stream', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -105,32 +148,186 @@ export default function ResearchForm() {
         clearTimeout(progressTimer);
         clearTimeout(timeoutId);
         
-        console.log('API response status:', response.status);
+        console.log('API response status:', streamResponse.status);
         
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
+        if (!streamResponse.ok) {
+          const errorData = await streamResponse.json().catch(() => ({}));
           console.error('API error response:', errorData);
           
           // Handle specific status codes
-          if (response.status === 504) {
+          if (streamResponse.status === 504) {
             throw new Error('The request timed out. Please try with shorter content or try again later.');
-          } else if (response.status === 429) {
+          } else if (streamResponse.status === 429) {
             throw new Error('Too many requests. Please try again later.');
           } else {
-            throw new Error(`Failed to generate summary: ${errorData.error || response.statusText}`);
+            throw new Error(`Failed to generate summary: ${errorData.error || streamResponse.statusText}`);
           }
         }
         
-        const data = await response.json();
-        console.log('Summary generated successfully');
-        setSummary(data.summary);
-        summaryContent = data.summary; // Store the summary content for later use
+        const reader = streamResponse.body?.getReader();
+        let summaryText = '';
         
-      } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') {
-          throw new Error('Request timed out. Please try again with shorter content.');
+        if (!reader) {
+          throw new Error('Failed to get response reader');
         }
-        throw error;
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          // Process the chunk
+          const text = new TextDecoder().decode(value);
+          
+          // Split by newlines in case multiple JSON objects were sent
+          const jsonLines = text.split('\n').filter(line => line.trim());
+          
+          for (const line of jsonLines) {
+            try {
+              const data = JSON.parse(line);
+              
+              // Handle heartbeat to keep connection alive
+              if (data.heartbeat) {
+                console.log('Received heartbeat:', new Date(data.timestamp).toISOString());
+                continue; // Skip further processing for heartbeats
+              }
+              
+              // Handle progress updates
+              if (data.progress) {
+                setProgress(data.progress);
+              }
+              
+              // Handle different message types
+              if (data.status) {
+                setStatus(data.message || '');
+                
+                if (data.status === 'researching') {
+                  setProcessingStage('researching');
+                } else if (data.status === 'generating') {
+                  setProcessingStage('generating');
+                } else if (data.status === 'researched' && data.webResearchUsed) {
+                  setWebResearchUsed(true);
+                }
+              }
+              
+              // Update summary with partial content
+              if (data.partialSummary) {
+                summaryText += data.partialSummary;
+                setSummary(summaryText);
+                
+                // Check if this chunk includes web research info
+                if (data.webResearchUsed) {
+                  setWebResearchUsed(true);
+                }
+              }
+            } catch (e) {
+              console.error('Error parsing JSON from stream:', e);
+            }
+          }
+        }
+        
+        // Set final data
+        setResponseData({ 
+          summary: summaryText,
+          webResearchUsed: webResearchUsed
+        });
+        summaryContent = summaryText;
+        
+      } catch (streamError) {
+        console.error('Streaming API failed, falling back to standard API:', streamError);
+        setStatus('Streaming failed, using standard API instead...');
+        
+        try {
+          // Fall back to the standard API
+          const fallbackResponse = await fetch('/api/generate-summary', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ 
+              title, 
+              content,
+              userProfile
+            })
+          });
+          
+          if (!fallbackResponse.ok) {
+            const fallbackErrorData = await fallbackResponse.json().catch(() => ({}));
+            console.error('Fallback API error response:', fallbackErrorData);
+            
+            throw new Error(`Failed to generate summary: ${fallbackErrorData.error || fallbackResponse.statusText}`);
+          }
+          
+          const fallbackReader = fallbackResponse.body?.getReader();
+          let fallbackSummaryText = '';
+          
+          if (!fallbackReader) {
+            throw new Error('Failed to get response reader');
+          }
+          
+          while (true) {
+            const { done, value } = await fallbackReader.read();
+            if (done) break;
+            
+            // Process the chunk
+            const text = new TextDecoder().decode(value);
+            
+            // Split by newlines in case multiple JSON objects were sent
+            const jsonLines = text.split('\n').filter(line => line.trim());
+            
+            for (const line of jsonLines) {
+              try {
+                const data = JSON.parse(line);
+                
+                // Handle heartbeat to keep connection alive
+                if (data.heartbeat) {
+                  console.log('Received heartbeat:', new Date(data.timestamp).toISOString());
+                  continue; // Skip further processing for heartbeats
+                }
+                
+                // Handle progress updates
+                if (data.progress) {
+                  setProgress(data.progress);
+                }
+                
+                // Handle different message types
+                if (data.status) {
+                  setStatus(data.message || '');
+                  
+                  if (data.status === 'researching') {
+                    setProcessingStage('researching');
+                  } else if (data.status === 'generating') {
+                    setProcessingStage('generating');
+                  } else if (data.status === 'researched' && data.webResearchUsed) {
+                    setWebResearchUsed(true);
+                  }
+                }
+                
+                // Update summary with partial content
+                if (data.partialSummary) {
+                  fallbackSummaryText += data.partialSummary;
+                  setSummary(fallbackSummaryText);
+                  
+                  // Check if this chunk includes web research info
+                  if (data.webResearchUsed) {
+                    setWebResearchUsed(true);
+                  }
+                }
+              } catch (e) {
+                console.error('Error parsing JSON from stream:', e);
+              }
+            }
+          }
+          
+          // Set final data
+          setResponseData({ 
+            summary: fallbackSummaryText,
+            webResearchUsed: webResearchUsed
+          });
+          summaryContent = fallbackSummaryText;
+          
+        } catch (fallbackError) {
+          throw fallbackError;
+        }
       }
       
       setProcessingStage('saving');
@@ -180,11 +377,21 @@ export default function ResearchForm() {
       
       setProcessingStage('complete');
       
+      // When complete, set progress to 100%
+      setProgress(100);
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+      
     } catch (error) {
       console.error('Error submitting research:', error);
       setError(`${error instanceof Error ? error.message : 'Failed to submit research. Please try again.'}`);
       setStatus('');
       setProcessingStage('idle');
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+      setProgress(0);
     } finally {
       setLoading(false);
     }
@@ -207,6 +414,24 @@ export default function ResearchForm() {
         </Alert>
       )}
       
+      {loading && (
+        <div className="space-y-2">
+          <Progress value={progress} className="h-2" />
+          <div className="flex justify-between text-xs text-muted-foreground">
+            <span>
+              {processingStage === 'researching' ? 'Researching...' : 
+               processingStage === 'generating' ? 'Generating...' : 
+               processingStage === 'saving' ? 'Saving...' : 'Processing...'}
+            </span>
+            <span>
+              {progress < 100 ? 
+                `${Math.round(progress)}% (Est. ${Math.ceil(estimatedTime - ((progress / 100) * estimatedTime))}s remaining)` : 
+                'Complete!'}
+            </span>
+          </div>
+        </div>
+      )}
+      
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
           <Input
@@ -225,6 +450,11 @@ export default function ResearchForm() {
             rows={8}
             required
           />
+          <p className="text-xs text-muted-foreground mt-1">
+            {content.length} characters {content.length > 1000 && 
+              <span className="text-amber-500">(shorter content will process faster)</span>
+            }
+          </p>
         </div>
         
         <Button 
@@ -251,6 +481,9 @@ export default function ResearchForm() {
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">AI-Enhanced Summary</CardTitle>
+            {responseData.webResearchUsed && (
+              <CardDescription>Includes recent web research</CardDescription>
+            )}
           </CardHeader>
           <CardContent>
             <div className="prose dark:prose-invert max-w-none">
