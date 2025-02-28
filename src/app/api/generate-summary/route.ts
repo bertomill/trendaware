@@ -38,7 +38,7 @@ const logError = (message: string, error: unknown) => {
 };
 
 export const config = {
-  maxDuration: 60,
+  maxDuration: 60, // Maximum duration in seconds
   runtime: 'edge',
 };
 
@@ -112,26 +112,33 @@ Tailor your summary to their background and interests, addressing them by name o
         console.log('Sending request to Perplexity API for web research');
         console.time('perplexity-request');
         
-        const perplexityResponse = await fetch('https://api.perplexity.ai/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
-          },
-          body: JSON.stringify({
-            model: "sonar-pro",
-            messages: [
-              { 
-                role: "system", 
-                content: "You are a financial research assistant. Search the web for the most recent and relevant information. Focus on facts, data, and recent developments." 
-              },
-              { 
-                role: "user", 
-                content: `Research the following topic and provide the most recent information: ${title}. Focus on financial implications, market trends, and recent news.` 
-              }
-            ],
+        // Add a timeout for the Perplexity request
+        const perplexityResponse = await Promise.race([
+          fetch('https://api.perplexity.ai/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
+            },
+            body: JSON.stringify({
+              model: "sonar-pro",
+              messages: [
+                { 
+                  role: "system", 
+                  content: "You are a financial research assistant. Search the web for the most recent and relevant information. Focus on facts, data, and recent developments. Be concise." 
+                },
+                { 
+                  role: "user", 
+                  content: `Research the following topic and provide the most recent information in a brief format: ${title}. Focus on financial implications, market trends, and recent news.` 
+                }
+              ],
+              max_tokens: 500, // Limit the response size
+            }),
           }),
-        });
+          new Promise<Response>((_, reject) => 
+            setTimeout(() => reject(new Error('Perplexity API request timed out after 15 seconds')), 15000)
+          )
+        ]) as Response;
         
         console.timeEnd('perplexity-request');
         

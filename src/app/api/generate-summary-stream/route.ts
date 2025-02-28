@@ -2,7 +2,7 @@
 import OpenAI from 'openai';
 
 export const config = {
-  maxDuration: 30,
+  maxDuration: 60, // Maximum duration in seconds
   runtime: 'edge',
 };
 
